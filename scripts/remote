@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Build and test on a build machine instead of this one.
+#
+#   scripts/remote <cargo args...>     e.g.  scripts/remote test --locked -p lumbridge-core --lib paths
+#   scripts/remote --ci                run scripts/ci.sh there (format, clippy, the whole suite)
+#   scripts/remote --sh '<command>'    run a shell command in the remote copy
+#
+# Copies this checkout (the worktree you are in, with vendor/ghostty) to
+# $LBC_BUILD_HOST:$LBC_BUILD_DIR and runs there, niced, with at most $JOBS jobs. The remote target
+# folder is kept between runs.
+#
+#   LBC_BUILD_HOST   an ssh host that has Rust and Zig 0.16 (required; there is no default)
+#   LBC_BUILD_DIR    folder on that host, relative to its home (default build/lumbridge-core-<branch>)
+#   JOBS             default 4
+set -euo pipefail
+host=${LBC_BUILD_HOST:?set LBC_BUILD_HOST to the ssh name of a build machine}
+jobs=${JOBS:-4}
+root=$(git rev-parse --show-toplevel)
+branch=$(git -C "$root" rev-parse --abbrev-ref HEAD | tr -c 'A-Za-z0-9._\n-' '-')
+dest=${LBC_BUILD_DIR:-build/lumbridge-core-$branch}
+[ -e "$root/vendor/ghostty/build.zig" ] || { echo "vendor/ghostty is empty: git submodule update --init --depth 1" >&2; exit 1; }
+ssh -o BatchMode=yes "$host" "mkdir -p ~/$dest" </dev/null
+rsync -a --delete --exclude /target --exclude .git --exclude /vendor/ghostty/.zig-cache --exclude /vendor/ghostty/zig-out "$root/" "$host:$dest/"
+# setsid: the kill and interrupt tests fail when signals arrive ignored, as they do without a terminal.
+pre='export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH CARGO_BUILD_JOBS='"$jobs"' CARGO_TERM_COLOR=never;'
+case "${1:-}" in
+  --ci) cmd="RUST_TEST_THREADS=$jobs setsid -w nice -n 15 scripts/ci.sh" ;;
+  --sh) shift; cmd="$*" ;;
+  "") echo "usage: scripts/remote <cargo args...> | --ci | --sh '<command>'" >&2; exit 2 ;;
+  *) cmd="setsid -w nice -n 15 cargo $(printf '%q ' "$@")" ;;
+esac
+ssh -o BatchMode=yes "$host" "cd ~/$dest && $pre $cmd" </dev/null
